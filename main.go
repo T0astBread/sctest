@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
 	"math/rand"
 	"os"
 	"path"
+	"syscall"
 	"time"
 
 	sc "github.com/seccomp/libseccomp-golang"
@@ -41,6 +44,11 @@ func main() {
 	ep(err)
 	println("RID", req.ID)
 
+	fmt.Printf("ARGS %#v\n", req.Data.Args)
+	mkdirPath, err := readArgString(int64(req.Data.Args[1]))
+	ep(err)
+	println("PATH ARG", mkdirPath)
+
 	var errno int32
 	var flags uint32 = sc.NotifRespFlagContinue
 	if randomChoice() {
@@ -68,4 +76,23 @@ func ep(err error) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func readArgString(offset int64) (string, error) {
+	buffer := make([]byte, 4096) // PATH_MAX
+
+	memfd, err := syscall.Open("/proc/self/mem", syscall.O_RDONLY, 0o777)
+	if err != nil {
+		return "", err
+	}
+	defer syscall.Close(memfd)
+
+	_, err = syscall.Pread(memfd, buffer, offset)
+	if err != nil {
+		return "", err
+	}
+
+	buffer[len(buffer)-1] = 0
+	s := buffer[:bytes.IndexByte(buffer, 0)]
+	return string(s), nil
 }
