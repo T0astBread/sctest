@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/signal"
 	"sync"
 	"syscall"
 	"time"
@@ -28,11 +29,7 @@ func mainExec() {
 	ep(err)
 	ep(filter.AddRule(mkdir, sc.ActNotify))
 
-	ep(filter.Load())
-	println("Loaded filter")
-
-	nfd, err := filter.GetNotifFd()
-	ep(err)
+	nfdChan := make(chan int, 0)
 
 	continueGroup := sync.WaitGroup{}
 	continueGroup.Add(1)
@@ -49,7 +46,13 @@ func mainExec() {
 		defer conn.Close()
 		connFile, err := conn.File()
 		ep(err)
+
+		nfd := <-nfdChan
+
 		ep(sendFDOverUnixSocket(int(connFile.Fd()), int(nfd)))
+		ep(syscall.Close(int(nfd)))
+		println("Closed FD")
+
 		continueGroup.Done()
 	}()
 
@@ -60,16 +63,19 @@ func mainExec() {
 			os.Stdout.Fd(),
 			os.Stdin.Fd(),
 			os.Stderr.Fd(),
-			uintptr(nfd),
 		},
 	})
 	ep(err)
 	println("Started monitor", monPID)
 
-	continueGroup.Wait()
+	ep(filter.Load())
+	println("Loaded filter")
 
-	ep(syscall.Close(int(nfd)))
-	println("Closed FD")
+	nfd, err := filter.GetNotifFd()
+	ep(err)
+	nfdChan <- int(nfd)
+
+	continueGroup.Wait()
 
 	// fork exec
 	pid, err := syscall.ForkExec("/usr/bin/fish", []string{}, &syscall.ProcAttr{
@@ -95,36 +101,52 @@ func mainMonitor() {
 	rand.Seed(time.Now().UnixNano())
 
 	notifyFD := recieveNotifyFD()
+	defer os.Remove(".notifier")
+	defer syscall.Close(int(notifyFD))
+
+	reqChan := make(chan *sc.ScmpNotifReq)
+	go func() {
+		for {
+			req, err := sc.NotifReceive(notifyFD)
+			ep(err)
+			reqChan <- req
+		}
+	}()
+
+	signalChan := make(chan os.Signal)
+	signal.Notify(signalChan, syscall.SIGINT)
 
 	println("Starting monitor")
-	defer println("Monitor done")
-
+notify:
 	for {
-		req, err := sc.NotifReceive(notifyFD)
-		ep(err)
-		println("RID", req.ID)
-
-		var errno int32
-		var flags uint32 = sc.NotifRespFlagContinue
-		if randomChoice() {
-			errno = 1
-			flags = 0
-			println("fail")
-		} else {
-			println("success")
+		select {
+		case <-signalChan:
+			break notify
+		case req := <-reqChan:
+			var errno int32
+			var flags uint32 = sc.NotifRespFlagContinue
+			if randomChoice() {
+				errno = 1
+				flags = 0
+				println("fail")
+			} else {
+				println("success")
+			}
+			// time.Sleep(5 * time.Second)
+			sc.NotifRespond(notifyFD, &sc.ScmpNotifResp{
+				ID:    req.ID,
+				Error: errno,
+				Val:   0,
+				Flags: flags,
+			})
 		}
-		// time.Sleep(5 * time.Second)
-		sc.NotifRespond(notifyFD, &sc.ScmpNotifResp{
-			ID:    req.ID,
-			Error: errno,
-			Val:   0,
-			Flags: flags,
-		})
 	}
+	println("Monitor done")
 }
 
 func randomChoice() bool {
-	return rand.Intn(2) == 1
+	// return rand.Intn(2) == 1
+	return true
 }
 
 func sendFDOverUnixSocket(socketFD, fd int) error {
