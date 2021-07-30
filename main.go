@@ -5,8 +5,8 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -14,7 +14,7 @@ import (
 )
 
 func main() {
-	if len(os.Args) > 0 && os.Args[0] == "monitor" {
+	if len(os.Args) > 1 && os.Args[1] == "monitor" {
 		mainMonitor()
 	} else {
 		mainExec()
@@ -22,43 +22,45 @@ func main() {
 }
 
 func mainExec() {
-	filter, err := sc.NewFilter(sc.ActAllow)
+	os.Exit(runExec())
+}
+
+func runExec() int {
+	cwd, err := os.Getwd()
 	ep(err)
-
-	mkdir, err := sc.GetSyscallFromName("mkdir")
+	tmpDir, err := os.MkdirTemp("", "sctest-")
 	ep(err)
-	ep(filter.AddRule(mkdir, sc.ActNotify))
+	defer os.Remove(tmpDir)
+	ep(os.Chdir(tmpDir))
 
-	nfdChan := make(chan int, 0)
+	cleanUpFilter := initializeFilter()
+	defer cleanUpFilter()
 
-	continueGroup := sync.WaitGroup{}
-	continueGroup.Add(1)
+	cmd := exec.Command("/usr/bin/fish")
+	cmd.Dir = cwd
+	cmd.Stdout = os.Stdout
+	cmd.Stdin = os.Stdin
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if err, ok := err.(*exec.ExitError); ok {
+			return err.ExitCode()
+		}
+	}
+	return 0
+}
 
-	go func() {
-		listener, err := net.ListenUnix("unix", &net.UnixAddr{
-			Name: "sock",
-		})
-		ep(err)
-		defer listener.Close()
-
-		conn, err := listener.AcceptUnix()
-		ep(err)
-		defer conn.Close()
-		connFile, err := conn.File()
-		ep(err)
-
-		nfd := <-nfdChan
-
-		ep(sendFDOverUnixSocket(int(connFile.Fd()), int(nfd)))
-		ep(syscall.Close(int(nfd)))
-		println("Closed FD")
-
-		continueGroup.Done()
-	}()
+func initializeFilter() func() {
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{
+		Name: "sock",
+	})
+	ep(err)
+	defer listener.Close()
 
 	selfExec, err := os.Executable()
 	ep(err)
-	monPID, err := syscall.ForkExec(selfExec, []string{"monitor"}, &syscall.ProcAttr{
+	monArgv := []string{selfExec, "monitor"}
+	monPID, err := syscall.ForkExec(monArgv[0], monArgv, &syscall.ProcAttr{
+		Env: os.Environ(),
 		Files: []uintptr{
 			os.Stdout.Fd(),
 			os.Stdin.Fd(),
@@ -68,40 +70,42 @@ func mainExec() {
 	ep(err)
 	println("Started monitor", monPID)
 
+	filter, err := sc.NewFilter(sc.ActAllow)
+	ep(err)
+
+	mkdir, err := sc.GetSyscallFromName("mkdir")
+	ep(err)
+	ep(filter.AddRule(mkdir, sc.ActNotify))
+
+	conn, err := listener.AcceptUnix()
+	ep(err)
+	defer conn.Close()
+	connFile, err := conn.File()
+	ep(err)
+	defer connFile.Close()
+
 	ep(filter.Load())
 	println("Loaded filter")
 
 	nfd, err := filter.GetNotifFd()
 	ep(err)
-	nfdChan <- int(nfd)
+	ep(sendFDOverUnixSocket(int(connFile.Fd()), int(nfd)))
+	ep(syscall.Close(int(nfd)))
+	println("Closed FD")
 
-	continueGroup.Wait()
-
-	// fork exec
-	pid, err := syscall.ForkExec("/usr/bin/fish", []string{}, &syscall.ProcAttr{
-		Env: os.Environ(),
-		Files: []uintptr{
-			os.Stdout.Fd(),
-			os.Stdin.Fd(),
-			os.Stderr.Fd(),
-		},
-	})
-	ep(err)
-	println("Started process", pid)
-
-	var ws syscall.WaitStatus
-	syscall.Wait4(pid, &ws, 0, &syscall.Rusage{})
-	println("Process exited")
-
-	syscall.Kill(monPID, syscall.SIGINT)
-	syscall.Wait4(monPID, &ws, 0, &syscall.Rusage{})
+	cleanup := func() {
+		ep(syscall.Kill(monPID, syscall.SIGINT))
+		var ws syscall.WaitStatus
+		_, err := syscall.Wait4(monPID, &ws, 0, &syscall.Rusage{})
+		ep(err)
+	}
+	return cleanup
 }
 
 func mainMonitor() {
 	rand.Seed(time.Now().UnixNano())
 
 	notifyFD := recieveNotifyFD()
-	defer os.Remove(".notifier")
 	defer syscall.Close(int(notifyFD))
 
 	reqChan := make(chan *sc.ScmpNotifReq)
@@ -144,9 +148,10 @@ notify:
 	println("Monitor done")
 }
 
+var t int64 = time.Now().Unix()
+
 func randomChoice() bool {
-	// return rand.Intn(2) == 1
-	return true
+	return time.Now().Unix()-t > 5 && rand.Intn(2) == 1
 }
 
 func sendFDOverUnixSocket(socketFD, fd int) error {
@@ -162,6 +167,7 @@ func recieveNotifyFD() sc.ScmpFd {
 	defer conn.Close()
 	connFile, err := conn.File()
 	ep(err)
+	defer connFile.Close()
 	nfd, err := recieveFDFromUnixSocket(int(connFile.Fd()))
 	ep(err)
 
