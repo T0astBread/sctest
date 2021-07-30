@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,9 +16,22 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "monitor" {
+		waitForDebugger("monitor")
 		mainMonitor()
 	} else {
+		waitForDebugger("execer")
 		mainExec()
+	}
+}
+
+func waitForDebugger(keyword string) {
+	if strings.Contains(os.Getenv("SCT_DEBUG_WAIT"), keyword) {
+		println("Waiting for debugger...")
+		for i := 10; i > 0; i-- {
+			fmt.Printf("%d... ", i)
+			time.Sleep(1 * time.Second)
+		}
+		println()
 	}
 }
 
