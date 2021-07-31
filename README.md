@@ -15,9 +15,8 @@ Code.
 
 If you need to debug some initialization steps, set the
 `SCT_DEBUG_WAIT` environment variable. If it contains the substring
-`execer` or `monitor`, the respective processes will wait for ten
-seconds before doing any meaningful work, giving you time to attach
-a debugger.
+`execer` or `monitor`, the respective processes will wait for Delve
+to attach.
 
 In VS Code, the `Execer` and `Monitor` launch configurations can be
 used to *connect to* the respective headless debuggers. They do not
@@ -35,5 +34,6 @@ A typical debugging setup would involve the following steps:
 5. Run the `Monitor` launch config from VS Code
 
 Note that the `attach-debugger-to` scripts can also be started before
-the program itself though this is not really useful since the timer
-will run to completion anyways.
+the program itself. To ensure that the program does not start with
+its initialization before the debugger is attached, setting the
+`SCT_SCT_DEBUG_WAIT` environment variable is still recommended.

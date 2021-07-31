@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"math/rand"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -24,15 +26,23 @@ func main() {
 	}
 }
 
+var debuggerRE *regexp.Regexp = regexp.MustCompile("(?m)^TracerPid:\\s+[1-9]\\d*$")
+
 func waitForDebugger(keyword string) {
 	if strings.Contains(os.Getenv("SCT_DEBUG_WAIT"), keyword) {
 		println("Waiting for debugger...")
-		for i := 10; i > 0; i-- {
-			fmt.Printf("%d... ", i)
-			time.Sleep(1 * time.Second)
+		for !isBeingDebugged() {
+			time.Sleep(250 * time.Millisecond)
 		}
-		println()
 	}
+}
+
+func isBeingDebugged() bool {
+	statusFile, err := os.Open("/proc/self/status")
+	ep(err)
+	statusBytes, err := io.ReadAll(statusFile)
+	ep(err)
+	return debuggerRE.Match(statusBytes)
 }
 
 func mainExec() {
