@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"math/rand"
@@ -16,13 +17,15 @@ import (
 	sc "github.com/seccomp/libseccomp-golang"
 )
 
+const wdBufferLen = 8192
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "monitor" {
-		waitForDebugger("monitor")
-		mainMonitor()
-	} else {
+	if len(os.Args) > 1 && os.Args[1] == "execer" {
 		waitForDebugger("execer")
 		mainExec()
+	} else {
+		waitForDebugger("monitor")
+		mainMonitor()
 	}
 }
 
@@ -45,111 +48,55 @@ func isBeingDebugged() bool {
 	return debuggerRE.Match(statusBytes)
 }
 
-func mainExec() {
-	os.Exit(runExec())
+func mainMonitor() {
+	e := runMonitor()
+	os.Exit(e)
 }
 
-func runExec() int {
-	cwd, err := os.Getwd()
+func runMonitor() int {
+	rand.Seed(time.Now().UnixNano())
+
+	wd, err := os.Getwd()
 	ep(err)
 	tmpDir, err := os.MkdirTemp("", "sctest-")
 	ep(err)
 	defer os.Remove(tmpDir)
 	ep(os.Chdir(tmpDir))
 
-	cleanUpFilter := initializeFilter()
-	defer cleanUpFilter()
-
-	cmd := exec.Command("/usr/bin/fish")
-	cmd.Dir = cwd
-	cmd.Stdout = os.Stdout
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		if err, ok := err.(*exec.ExitError); ok {
-			return err.ExitCode()
-		}
-	}
-	return 0
-}
-
-func initializeFilter() func() {
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{
-		Name: "sock",
-	})
-	ep(err)
-	defer listener.Close()
-
-	selfExec, err := os.Executable()
-	ep(err)
-	monArgv := []string{selfExec, "monitor"}
-	monPID, err := syscall.ForkExec(monArgv[0], monArgv, &syscall.ProcAttr{
-		Env: os.Environ(),
-		Files: []uintptr{
-			os.Stdout.Fd(),
-			os.Stdin.Fd(),
-			os.Stderr.Fd(),
-		},
-	})
-	ep(err)
-	println("Started monitor", monPID)
-
-	filter, err := sc.NewFilter(sc.ActAllow)
-	ep(err)
-
-	mkdir, err := sc.GetSyscallFromName("mkdir")
-	ep(err)
-	ep(filter.AddRule(mkdir, sc.ActNotify))
-
-	conn, err := listener.AcceptUnix()
-	ep(err)
-	defer conn.Close()
-	connFile, err := conn.File()
-	ep(err)
-	defer connFile.Close()
-
-	ep(filter.Load())
-	println("Loaded filter")
-
-	nfd, err := filter.GetNotifFd()
-	ep(err)
-	ep(sendFDOverUnixSocket(int(connFile.Fd()), int(nfd)))
-	ep(syscall.Close(int(nfd)))
-	println("Closed FD")
-
-	cleanup := func() {
-		ep(syscall.Kill(monPID, syscall.SIGINT))
-		var ws syscall.WaitStatus
-		_, err := syscall.Wait4(monPID, &ws, 0, &syscall.Rusage{})
-		ep(err)
-	}
-	return cleanup
-}
-
-func mainMonitor() {
-	rand.Seed(time.Now().UnixNano())
-
-	notifyFD := recieveNotifyFD()
+	notifyFD, exitChan := initializeMonitor(wd)
 	defer syscall.Close(int(notifyFD))
 
 	reqChan := make(chan *sc.ScmpNotifReq)
+	reqCtx, cancelReqs := context.WithCancel(context.Background())
 	go func() {
 		for {
 			req, err := sc.NotifReceive(notifyFD)
-			ep(err)
+			if err != nil {
+				select {
+				case <-reqCtx.Done():
+					break
+				case <-time.After(500 * time.Millisecond):
+					panic(err)
+				}
+			}
 			reqChan <- req
 		}
 	}()
 
-	signalChan := make(chan os.Signal)
-	signal.Notify(signalChan, syscall.SIGINT)
-
 	println("Starting monitor")
-notify:
+	defer println("Monitor done")
 	for {
 		select {
-		case <-signalChan:
-			break notify
+		case execState := <-exitChan:
+			cancelReqs()
+			if execState.Signaled() {
+				println("sig'd:", execState.Signal().String())
+				signal.Reset()
+				ep(syscall.Kill(os.Getpid(), execState.Signal()))
+			} else if !execState.Exited() {
+				ep(fmt.Errorf("Unexpected execer process state: Not signaled and not exited: %#v", execState))
+			}
+			return execState.ExitStatus()
 		case req := <-reqChan:
 			var errno int32
 			var flags uint32 = sc.NotifRespFlagContinue
@@ -160,7 +107,6 @@ notify:
 			} else {
 				println("success")
 			}
-			// time.Sleep(5 * time.Second)
 			sc.NotifRespond(notifyFD, &sc.ScmpNotifResp{
 				ID:    req.ID,
 				Error: errno,
@@ -169,7 +115,84 @@ notify:
 			})
 		}
 	}
-	println("Monitor done")
+}
+
+func initializeMonitor(wd string) (sc.ScmpFd, chan syscall.WaitStatus) {
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{
+		Name: "sock",
+	})
+	ep(err)
+	defer listener.Close()
+
+	selfExec, err := os.Executable()
+	ep(err)
+	execerCmd := exec.Command(selfExec, "execer")
+	execerCmd.Stdout = os.Stdout
+	execerCmd.Stdin = os.Stdin
+	execerCmd.Stderr = os.Stderr
+	exitChan := make(chan syscall.WaitStatus)
+	go func() {
+		execerCmd.Run()
+		exitChan <- execerCmd.ProcessState.Sys().(syscall.WaitStatus)
+		println("Execer done")
+	}()
+	println("Started execer")
+
+	conn, err := listener.AcceptUnix()
+	ep(err)
+	defer conn.Close()
+
+	wdBytes := []byte(wd)
+	if len(wdBytes) > wdBufferLen {
+		panic(fmt.Errorf("Working directory path too long (length=%d max=%d)", len(wdBytes), wdBufferLen))
+	}
+	n, oobn, err := conn.WriteMsgUnix(wdBytes, []byte{}, nil)
+	ep(err)
+	if n != len(wdBytes) || oobn != 0 {
+		panic(fmt.Errorf("recvfd: incorrect number of bytes written (n=%d oobn=%d; wanted: n=%d oobn=0)", n, oobn, len(wdBytes)))
+	}
+
+	nfd, err := recieveFDFromUnixSocket(conn)
+	ep(err)
+
+	signal.Ignore(syscall.SIGINT)
+
+	return sc.ScmpFd(nfd), exitChan
+}
+
+func mainExec() {
+	initializeExec()
+	ep(syscall.Exec("/usr/bin/fish", []string{}, os.Environ()))
+}
+
+func initializeExec() {
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{
+		Name: "sock",
+	})
+	ep(err)
+	defer conn.Close()
+
+	wdBuffer := make([]byte, wdBufferLen)
+	n, _, _, _, err := conn.ReadMsgUnix(wdBuffer, []byte{})
+	ep(err)
+	wd := string(wdBuffer[:n])
+	ep(os.Chdir(wd))
+
+	filter, err := sc.NewFilter(sc.ActAllow)
+	ep(err)
+
+	mkdir, err := sc.GetSyscallFromName("mkdir")
+	ep(err)
+	ep(filter.AddRule(mkdir, sc.ActNotify))
+
+	ep(filter.Load())
+	println("Loaded filter")
+
+	nfd, err := filter.GetNotifFd()
+	ep(err)
+	ep(sendFDOverUnixSocket(conn, int(nfd)))
+	ep(syscall.Close(int(nfd)))
+	println("Closed FD")
 }
 
 var t int64 = time.Now().Unix()
@@ -178,33 +201,25 @@ func randomChoice() bool {
 	return time.Now().Unix()-t > 5 && rand.Intn(2) == 1
 }
 
-func sendFDOverUnixSocket(socketFD, fd int) error {
+func sendFDOverUnixSocket(conn *net.UnixConn, fd int) error {
 	oob := syscall.UnixRights(fd)
-	return syscall.Sendmsg(socketFD, []byte{}, oob, nil, 0)
+	n, oobn, err := conn.WriteMsgUnix([]byte{}, oob, nil)
+	if err != nil {
+		return err
+	}
+	if n != 0 || oobn != len(oob) {
+		return fmt.Errorf("sendmsg: incorrect number of bytes written (n=%d oobn=%d)", n, oobn)
+	}
+	return nil
 }
 
-func recieveNotifyFD() sc.ScmpFd {
-	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{
-		Name: "sock",
-	})
-	ep(err)
-	defer conn.Close()
-	connFile, err := conn.File()
-	ep(err)
-	defer connFile.Close()
-	nfd, err := recieveFDFromUnixSocket(int(connFile.Fd()))
-	ep(err)
-
-	return sc.ScmpFd(nfd)
-}
-
-func recieveFDFromUnixSocket(socketFD int) (int, error) {
+func recieveFDFromUnixSocket(conn *net.UnixConn) (int, error) {
 	MaxNameLen := 4096
 	oobSpace := syscall.CmsgSpace(4)
 	stateBuf := make([]byte, 4096)
 	oob := make([]byte, oobSpace)
 
-	n, oobn, _, _, err := syscall.Recvmsg(socketFD, stateBuf, oob, 0)
+	n, oobn, _, _, err := conn.ReadMsgUnix(stateBuf, oob)
 	if err != nil {
 		return 0, err
 	}

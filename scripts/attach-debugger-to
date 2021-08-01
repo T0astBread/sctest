@@ -7,10 +7,10 @@ method="$2"
 function findproc {
 	case "$proc" in
 		"execer")
-			pgrep -fx './sctest-dbg'
+			pgrep -fx "$(pwd)/sctest-dbg execer"
 			;;
 		"monitor")
-			pgrep -fx "$(pwd)/sctest-dbg monitor"
+			pgrep -fx ./sctest-dbg
 			;;
 	esac
 }
