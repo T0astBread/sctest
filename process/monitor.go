@@ -64,14 +64,13 @@ func RunMonitor() int {
 			}
 			return execState.ExitStatus()
 		case req := <-reqChan:
+			name, err := req.Data.Syscall.GetName()
+			util.EP(err)
 			var errno int32
 			var flags uint32 = sc.NotifRespFlagContinue
-			if randomChoice() {
-				errno = 1
+			if !zenity(name) {
+				errno = int32(syscall.EPERM)
 				flags = 0
-				println("fail")
-			} else {
-				println("success")
 			}
 			sc.NotifRespond(notifyFD, &sc.ScmpNotifResp{
 				ID:    req.ID,
@@ -130,6 +129,7 @@ func initializeMonitor(wd string) (sc.ScmpFd, chan syscall.WaitStatus) {
 
 var t int64 = time.Now().Unix()
 
-func randomChoice() bool {
-	return time.Now().Unix()-t > 5 && rand.Intn(2) == 1
+func zenity(call string) bool {
+	cmd := exec.Command("zenity", "--question", "--text", call)
+	return time.Now().Unix()-t < 5 || cmd.Run() == nil
 }

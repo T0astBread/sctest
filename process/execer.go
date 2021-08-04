@@ -17,7 +17,8 @@ import (
 // and `RunExecer` will not return unless an error occurs.
 func RunExecer() int {
 	initializeExec()
-	util.EP(syscall.Exec("/usr/bin/fish", []string{}, os.Environ()))
+	println("execing")
+	util.EP(syscall.Exec("/bin/sh", []string{}, os.Environ()))
 	return 0
 }
 
@@ -34,12 +35,23 @@ func initializeExec() {
 	wd := string(wdBuffer[:n])
 	util.EP(os.Chdir(wd))
 
-	filter, err := sc.NewFilter(sc.ActAllow)
+	filter, err := sc.NewFilter(sc.ActNotify)
 	util.EP(err)
 
-	mkdir, err := sc.GetSyscallFromName("mkdir")
-	util.EP(err)
-	util.EP(filter.AddRule(mkdir, sc.ActNotify))
+	requiredCalls := []string{
+		"write",
+		"futex",
+		"epoll_ctl",
+		"close",
+		"sendmsg",
+		"getsockopt",
+	}
+	for _, name := range requiredCalls {
+		call, err := sc.GetSyscallFromName(name)
+		util.EP(err)
+		println("Allowing", name)
+		util.EP(filter.AddRule(call, sc.ActAllow))
+	}
 
 	util.EP(filter.Load())
 	println("Loaded filter")
