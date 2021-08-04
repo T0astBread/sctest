@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"syscall"
 	"time"
 
@@ -92,9 +93,11 @@ func initializeMonitor(wd string) (sc.ScmpFd, chan syscall.WaitStatus) {
 	selfExec, err := os.Executable()
 	util.EP(err)
 	execerCmd := exec.Command(selfExec, "execer")
-	execerCmd.Stdout = os.Stdout
+	outFD, errFD, err := util.RedirectOutputs(path.Join(wd, "monitor"))
+	util.EP(err)
+	execerCmd.Stdout = os.NewFile(uintptr(outFD), "out")
+	execerCmd.Stderr = os.NewFile(uintptr(errFD), "err")
 	execerCmd.Stdin = os.Stdin
-	execerCmd.Stderr = os.Stderr
 	exitChan := make(chan syscall.WaitStatus)
 	go func() {
 		execerCmd.Run()

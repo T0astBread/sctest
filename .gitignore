@@ -1,2 +1,4 @@
 sctest
 sctest-dbg
+monitor.stdout
+monitor.stderr
