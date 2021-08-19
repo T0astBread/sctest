@@ -1,6 +1,7 @@
 package process
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand"
@@ -17,7 +18,7 @@ import (
 	"t0ast.cc/sctest/util"
 )
 
-// RunExecer runs the "monitor" process procedure and returns the
+// RunMonitor runs the "monitor" process procedure and returns the
 // exit status.
 func RunMonitor() int {
 	rand.Seed(time.Now().UnixNano())
@@ -66,12 +67,16 @@ func RunMonitor() int {
 		case req := <-reqChan:
 			name, err := req.Data.Syscall.GetName()
 			util.EP(err)
+			fmt.Printf("%#v", req.Data.Args)
+			mkdirPath, err := readArgString(int64(req.Data.Args[0]), req.Pid)
+			util.EP(err)
 			var errno int32
 			var flags uint32 = sc.NotifRespFlagContinue
-			if !zenity(name) {
+			if !zenity(name + " " + mkdirPath) {
 				errno = int32(syscall.EPERM)
 				flags = 0
 			}
+			util.EP(sc.NotifIDValid(notifyFD, req.ID)) // Doesn't detect arg modifications?
 			sc.NotifRespond(notifyFD, &sc.ScmpNotifResp{
 				ID:    req.ID,
 				Error: errno,
@@ -131,5 +136,24 @@ var t int64 = time.Now().Unix()
 
 func zenity(call string) bool {
 	cmd := exec.Command("zenity", "--question", "--text", call)
-	return time.Now().Unix()-t < 5 || cmd.Run() == nil
+	return cmd.Run() == nil
+}
+
+func readArgString(offset int64, pid uint32) (string, error) {
+	buffer := make([]byte, 4096) // PATH_MAX
+
+	memfd, err := syscall.Open(fmt.Sprintf("/proc/%d/mem", pid), syscall.O_RDONLY, 0o777)
+	if err != nil {
+		return "", err
+	}
+	defer syscall.Close(memfd)
+
+	_, err = syscall.Pread(memfd, buffer, offset)
+	if err != nil {
+		return "", err
+	}
+
+	buffer[len(buffer)-1] = 0
+	s := buffer[:bytes.IndexByte(buffer, 0)]
+	return string(s), nil
 }

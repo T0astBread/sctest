@@ -2,3 +2,4 @@ sctest
 sctest-dbg
 monitor.stdout
 monitor.stderr
+exploits/change-args

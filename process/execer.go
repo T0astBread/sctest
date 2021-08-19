@@ -18,7 +18,7 @@ import (
 func RunExecer() int {
 	initializeExec()
 	println("execing")
-	util.EP(syscall.Exec("/bin/sh", []string{}, os.Environ()))
+	util.EP(syscall.Exec("exploits/change-args", []string{}, os.Environ()))
 	return 0
 }
 
@@ -35,23 +35,12 @@ func initializeExec() {
 	wd := string(wdBuffer[:n])
 	util.EP(os.Chdir(wd))
 
-	filter, err := sc.NewFilter(sc.ActNotify)
+	filter, err := sc.NewFilter(sc.ActAllow)
 	util.EP(err)
 
-	requiredCalls := []string{
-		"write",
-		"futex",
-		"epoll_ctl",
-		"close",
-		"sendmsg",
-		"getsockopt",
-	}
-	for _, name := range requiredCalls {
-		call, err := sc.GetSyscallFromName(name)
-		util.EP(err)
-		println("Allowing", name)
-		util.EP(filter.AddRule(call, sc.ActAllow))
-	}
+	mkdir, err := sc.GetSyscallFromName("mkdir")
+	util.EP(err)
+	util.EP(filter.AddRule(mkdir, sc.ActNotify))
 
 	util.EP(filter.Load())
 	println("Loaded filter")
